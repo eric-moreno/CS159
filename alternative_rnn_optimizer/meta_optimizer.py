@@ -86,6 +86,7 @@ class MetaOptimizerLSTM(nn.Module):
 
     def meta_update(self, model_with_grads, loss):
         # First we need to create a flat version of parameters and gradients
+        
         grads = []
 
         for module in model_with_grads.children():
@@ -103,7 +104,7 @@ class MetaOptimizerLSTM(nn.Module):
         # Finally, copy values from the meta model to the normal one.
         self.meta_model.copy_params_to(model_with_grads)
         return self.meta_model.model
-
+        
 # A helper class that keeps track of meta updates
 # It's done by replacing parameters with variables and applying updates to
 # them.

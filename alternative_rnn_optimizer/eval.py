@@ -48,19 +48,26 @@ assert args.optimizer_steps % args.truncated_bptt_step == 0
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 
 train_loader = torch.utils.data.DataLoader(
-    datasets.MNIST('../data', train=True, transform=transforms.Compose([
+    datasets.MNIST('../data', train=False, transform=transforms.Compose([
                        transforms.ToTensor(),
                        transforms.Normalize((0.1307,), (0.3081,))
                    ])),
     batch_size=args.batch_size, shuffle=True, **kwargs)
 os.system('mkdir -p %s'%args.outdir)
 
+def weights_init(m):
+    if isinstance(m, nn.Linear):
+        nn.init.uniform_(m.weight.data)
+        nn.init.uniform_(m.bias.data)
+
 def main():
     # Create a meta optimizer that wraps a model into a meta model
     # to keep track of the meta updates.
+    
     meta_model = Model()
     if args.cuda:
         meta_model.cuda()
+    meta_model.apply(weights_init)
     
     if args.RNN == 'Fast':
         meta_optimizer = FastMetaOptimizer(MetaModel(meta_model), args.num_layers, args.hidden_size)
@@ -74,132 +81,84 @@ def main():
     if args.cuda:
         meta_optimizer.cuda()
     meta_optimizer.load_state_dict(torch.load('%s/%s_best.pth'%(args.outdir,'meta_optimizer')))
-    
-    #optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     l_val_model_best = 99999
     l_val_meta_model_best = 99999
-    loss_epoch = []
-    accuracy_epoch = []
+    accuracy_model = []
+    loss_model = []
     
-    for epoch in range(args.max_epoch):
-        print("Epoch %s\n" % epoch)
-        decrease_in_loss = 0.0
-        final_loss = 0.0
+    models_tested=50
+    train_iter = iter(train_loader)
+    epoch_loss = [[] for i in range(int(len(train_iter)*args.train_split // args.truncated_bptt_step))]  
+    
+    model = Model()
+    if args.cuda:
+        model.cuda() 
+    model.apply(weights_init)
+    for epoch in tqdm(range(models_tested)):
         train_iter = iter(train_loader)
-
         loss_train_model = []
         loss_train_meta = []
         loss_val_model = []
         loss_val_meta = []
         correct = 0 
         incorrect = 0 
-        
-        updates = args.updates_per_epoch
-        for i in tqdm(range(updates)):
-            
-            # Sample a new model
-            model = Model()
-            if args.cuda:
-                model.cuda()
-        
-            x, y = next(train_iter)
-            if args.cuda:
-                x, y = x.cuda(), y.cuda()
-            x, y = Variable(x), Variable(y)
-            
-            
-            # Compute initial loss of the model
-            f_x = model(x)
-            initial_loss = F.nll_loss(f_x, y)
+         
+        #model = Model()
+        #if args.cuda:
+        #    model.cuda() 
+        #model.apply(weights_init)
+        for k in range(int(len(train_iter)*args.train_split // (args.truncated_bptt_step*2))):
+                    # Keep states for truncated BPTT
+            meta_optimizer.reset_lstm(
+                        keep_states=k > 0, model=model, use_cuda=args.cuda)
 
-            
-            for k in range(args.optimizer_steps // args.truncated_bptt_step):
-                # Keep states for truncated BPTT
-                meta_optimizer.reset_lstm(
-                    keep_states=k > 0, model=model, use_cuda=args.cuda)
-
-                loss_sum = 0
-                prev_loss = torch.zeros(1)
+            loss_sum = 0
+            prev_loss = torch.zeros(1)
+            if args.cuda:
+                prev_loss = prev_loss.cuda()
+            for j in range(args.truncated_bptt_step*2):
+                x, y = next(train_iter)
                 if args.cuda:
-                    prev_loss = prev_loss.cuda()
-                for j in range(args.truncated_bptt_step):
-                    x, y = next(train_iter)
-                    if args.cuda:
-                        x, y = x.cuda(), y.cuda()
-                    x, y = Variable(x), Variable(y)
+                    x, y = x.cuda(), y.cuda()
+                x, y = Variable(x), Variable(y)
+                        
+                                # First we need to compute the gradients of the model
+                f_x = model(x)
+                loss = F.nll_loss(f_x, y)
+                model.zero_grad()
+                loss.backward()
+                meta_model = meta_optimizer.meta_update(model, loss.data)
+            epoch_loss[k].append(loss.item())
+                
 
-                    # First we need to compute the gradients of the model
-                    f_x = model(x)
-                    loss = F.nll_loss(f_x, y)
-                    loss_train_model.append(loss.item())
-                    model.zero_grad()
-                    loss.backward()
-
-                    # Perfom a meta update using gradients from model
-                    # and return the current meta model saved in the optimizer
-                    meta_model = meta_optimizer.meta_update(model, loss.data)
-
-                    # Compute a loss for a step the meta optimizer
-                    f_x = meta_model(x)
-                    loss = F.nll_loss(f_x, y)
-                    loss_sum += (loss - Variable(prev_loss))
-
-                    prev_loss = loss.data
-                    
-                # Update the parameters of the meta optimizer
-
-                loss_train_meta.append(loss_sum.item())
-                loss_sum.backward()
-
-
-
-        #for i in tqdm(range(int((1-args.train_split) * len(train_loader)))):
-        for i in tqdm(range(int(len(train_iter) - args.updates_per_epoch*(1+args.optimizer_steps)))):
+                                # Compute a loss for a step the meta optimizer
+        for k in range(int(len(train_iter)*(1-args.train_split))):
             x, y = next(train_iter)
             if args.cuda:
                 x, y = x.cuda(), y.cuda()
             x, y = Variable(x), Variable(y)
-            
-            
-            #meta_optimizer.reset_lstm(
-            #        keep_states=k > 0, model=model, use_cuda=args.cuda)
-            
-            # Compute initial loss of the model
             f_x = meta_model(x)
-        
             for output, index in zip(f_x.cpu().detach().numpy(), range(len(f_x.cpu().detach().numpy()))):
                 if y[index] == output.argmax():
                     correct += 1
                 else: 
                     incorrect += 1
-                    
-            loss_model = F.nll_loss(f_x, y)
-            loss_val_model.append(loss_model.item())
-            
-            
-            #meta_model = meta_optimizer.meta_update(model, loss.data)
-
-            # Compute a loss for a step the meta optimizer
-            #f_x = meta_model(x)
-            #loss_meta = F.nll_loss(f_x, y)
-            
-            #loss_val_meta.append(loss_meta.item())
+            loss = F.nll_loss(f_x, y)
+            loss_val_model.append(loss.item())
         
         l_val_model = np.mean(loss_val_model)
-        #l_val_meta_model = np.mean(loss_val_meta)
-        loss_epoch.append(l_val_model)
-        accuracy_epoch.append(float(correct) / (correct + incorrect))
-        torch.save(meta_model.state_dict(), '%s/%s_last.pth'%(args.outdir,'meta_model_test'))
+        loss_model.append(l_val_model)
+        accuracy_model.append(float(correct) / (correct + incorrect))
+        print(float(correct) / (correct + incorrect))
 
-        if l_val_model < l_val_model_best:
-            print("new best model")
-            l_val_model_best = l_val_model
-            torch.save(model.state_dict(), '%s/%s_best.pth'%(args.outdir,'meta_model_test'))
             
-        print '\nValidation Loss Model: '+ str(l_val_model)     
-        print '\nValidation Accuracy: ' + str(float(correct) / (correct + incorrect))
-    np.save('%s/loss_epoch.npy'%(args.outdir), np.array(loss_epoch))
-    np.save('%s/accuracy_epoch.npy'%(args.outdir), np.array(accuracy_epoch))
+    print '\nValidation Loss Model: '+ str(np.mean(loss_model))     
+    print '\nValidation Accuracy: ' + str(np.mean(accuracy_model))
+    
+    [np.mean(i) for i in epoch_loss]
+    np.save('%s/loss_epoch_test.npy'%(args.outdir), [np.mean(i) for i in epoch_loss])
+    
+    
 if __name__ == "__main__":
     main()
