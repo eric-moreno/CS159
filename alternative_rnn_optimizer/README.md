@@ -12,6 +12,20 @@ Determine the parameters needed for the meta-learner. For example:
   - Specify cuda with --no-cuda
   - Many more options available in the main.py code! 
 ```bash
-python main.py --outdir training_directory --RNN GRU --num_layers 2
+python main.py --outdir training_directory --RNN GRU --num_layers 1
 ```
 
+## Evaluation
+
+Specify the location containing the trained meta-learner using --outdir.
+```bash
+python eval.py --outdir training_directory --RNN GRU --num_layers 1
+```
+
+## Plotting 
+
+Specify the location containing the trainings/evaluations: 
+
+```bash
+python epochs.py --outdir training_directory 
+```
